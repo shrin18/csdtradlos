@@ -1,0 +1,6 @@
+[submodule "gnuradio"]
+	path = gnuradio
+	url = https://github.com/gnuradio/gnuradio
+[submodule "thrift"]
+	path = thrift
+	url = https://github.com/apache/thrift
