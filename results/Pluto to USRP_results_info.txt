@@ -1,0 +1,7 @@
+1 TX USRP Data_edited
+2 TX USRP Data_edited
+3 TX USRP Data_edited
+4 TX USRP Data_edited
+We used four pluto SDRs as transmitter and USRP as receiver to decode the simultaneous transmissions.
+We used control port block at receiver side in gnuradio to measure how much clock cycles have been used by work function of block.
+Using the CPU clock frequency, we calculated the execution time of particular block 
