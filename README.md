@@ -1,4 +1,4 @@
-# csdtradlos
+# csdWireless
 Project 7:
 Efficient Scheduling for Parallelized CDMA 
 Transceiver with Software Defined Radio
