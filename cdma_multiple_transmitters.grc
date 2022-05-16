@@ -1,0 +1,643 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+##################################################
+# GNU Radio Python Flow Graph
+# Title: qt_cdma_txrx
+# Author: Achilleas Anastasopoulos, Zhe Feng
+# GNU Radio version: 3.7.13.5
+##################################################
+
+if __name__ == '__main__':
+    import ctypes
+    import sys
+    if sys.platform.startswith('linux'):
+        try:
+            x11 = ctypes.cdll.LoadLibrary('libX11.so')
+            x11.XInitThreads()
+        except:
+            print "Warning: failed to XInitThreads()"
+
+import os
+import sys
+sys.path.append(os.environ.get('GRC_HIER_PATH', os.path.expanduser('~/.grc_gnuradio')))
+
+from PyQt4 import Qt
+from PyQt4.QtCore import QObject, pyqtSlot
+from cdma_rx_hier import cdma_rx_hier  # grc-generated hier_block
+from cdma_tx_hier import cdma_tx_hier  # grc-generated hier_block
+from gnuradio import blocks
+from gnuradio import channels
+from gnuradio import eng_notation
+from gnuradio import gr
+from gnuradio.digital.utils import tagged_streams
+from gnuradio.eng_option import eng_option
+from gnuradio.filter import firdes
+from gnuradio.qtgui import Range, RangeWidget
+from optparse import OptionParser
+import cdma.cdma_parameters as cp
+import numpy ; numpy.random.seed(666)
+import threading
+import time
+from gnuradio import qtgui
+
+
+class qt_cdma_txrx(gr.top_block, Qt.QWidget):
+
+    def __init__(self):
+        gr.top_block.__init__(self, "qt_cdma_txrx")
+        Qt.QWidget.__init__(self)
+        self.setWindowTitle("qt_cdma_txrx")
+        qtgui.util.check_set_qss()
+        try:
+            self.setWindowIcon(Qt.QIcon.fromTheme('gnuradio-grc'))
+        except:
+            pass
+        self.top_scroll_layout = Qt.QVBoxLayout()
+        self.setLayout(self.top_scroll_layout)
+        self.top_scroll = Qt.QScrollArea()
+        self.top_scroll.setFrameStyle(Qt.QFrame.NoFrame)
+        self.top_scroll_layout.addWidget(self.top_scroll)
+        self.top_scroll.setWidgetResizable(True)
+        self.top_widget = Qt.QWidget()
+        self.top_scroll.setWidget(self.top_widget)
+        self.top_layout = Qt.QVBoxLayout(self.top_widget)
+        self.top_grid_layout = Qt.QGridLayout()
+        self.top_layout.addLayout(self.top_grid_layout)
+
+        self.settings = Qt.QSettings("GNU Radio", "qt_cdma_txrx")
+        self.restoreGeometry(self.settings.value("geometry").toByteArray())
+
+
+        ##################################################
+        # Variables
+        ##################################################
+        self.N0est = N0est = 1.0
+        self.Esest = Esest = 1e-2
+        self.training_percent = training_percent = cp.training_percent
+        self.EsN0dB_est = EsN0dB_est = 10*numpy.log10( cp.epsilon+ abs(Esest)/ (abs(N0est)+cp.epsilon) )
+        self.symbol_rate = symbol_rate = 100e3
+        self.chips_per_symbol = chips_per_symbol = cp.chips_per_symbol
+        self.DataEsN0dBthreshold = DataEsN0dBthreshold = 10
+        self.DataEsN0dB_est = DataEsN0dB_est = EsN0dB_est + 10*numpy.log10( 1.0-training_percent/100.0 )
+        self.samp_rate = samp_rate = symbol_rate*chips_per_symbol
+        self.onoff_manual = onoff_manual = 0
+        self.onoff_auto = onoff_auto = 0 if DataEsN0dB_est>DataEsN0dBthreshold else 1
+        self.manual = manual = 0
+        self.payload_bytes_per_frame = payload_bytes_per_frame = cp.payload_bytes_per_frame
+        self.onoff = onoff = onoff_auto if manual==0 else onoff_manual
+        self.freq_acq_est = freq_acq_est = 0
+        self.df = df = cp.df*samp_rate
+        self.TrainingEsN0dB_est = TrainingEsN0dB_est = EsN0dB_est + 10*numpy.log10( training_percent/100.0 )
+        self.EsN0dB = EsN0dB = 20
+        self.Es = Es = 1
+        self.variable_static_text = variable_static_text = 'Acquisition' if onoff==1 else 'Tracking'
+        self.payload = payload = map(int,numpy.random.randint(0,256,payload_bytes_per_frame))
+        self.n_filt = n_filt = cp.n_filt
+        self.freq_est_acq = freq_est_acq = freq_acq_est
+        self.fmaxt = fmaxt = cp.freqs[-1]*samp_rate
+        self.dft = dft = df
+        self.df_Hz = df_Hz = 0
+        self.delay = delay = 0
+        self.acq_threshold_dB = acq_threshold_dB = -10
+        self.TrainingEsN0dB = TrainingEsN0dB = TrainingEsN0dB_est
+        self.N0 = N0 = 10**(-EsN0dB/10) * Es
+        self.DataEsN0dB_estimated = DataEsN0dB_estimated = DataEsN0dB_est
+
+        ##################################################
+        # Blocks
+        ##################################################
+        self._df_Hz_range = Range((cp.freqs[0]*samp_rate)-1e-6, cp.freqs[-1]*samp_rate, (cp.freqs[-1]-cp.freqs[0])*samp_rate/1000, 0, 200)
+        self._df_Hz_win = RangeWidget(self._df_Hz_range, self.set_df_Hz, 'df_Hz', "counter_slider", float)
+        self.top_grid_layout.addWidget(self._df_Hz_win, 1, 0, 1, 3)
+        for r in range(1, 2):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(0, 3):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self._delay_range = Range(0, 99, 1, 0, 200)
+        self._delay_win = RangeWidget(self._delay_range, self.set_delay, 'delay', "counter_slider", int)
+        self.top_grid_layout.addWidget(self._delay_win, 2, 0, 1, 3)
+        for r in range(2, 3):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(0, 3):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self.blocks_probe_signal_n0 = blocks.probe_signal_f()
+        self.blocks_probe_signal_amp = blocks.probe_signal_f()
+        self.blocks_probe_freq = blocks.probe_signal_f()
+        self._acq_threshold_dB_range = Range(-20, 20, 0.1, -10, 200)
+        self._acq_threshold_dB_win = RangeWidget(self._acq_threshold_dB_range, self.set_acq_threshold_dB, 'acq_threshold_dB', "counter_slider", float)
+        self.top_grid_layout.addWidget(self._acq_threshold_dB_win, 4, 0, 1, 3)
+        for r in range(4, 5):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(0, 3):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self._variable_static_text_tool_bar = Qt.QToolBar(self)
+
+        if None:
+          self._variable_static_text_formatter = None
+        else:
+          self._variable_static_text_formatter = lambda x: str(x)
+
+        self._variable_static_text_tool_bar.addWidget(Qt.QLabel('Ack/Tra Status'+": "))
+        self._variable_static_text_label = Qt.QLabel(str(self._variable_static_text_formatter(self.variable_static_text)))
+        self._variable_static_text_tool_bar.addWidget(self._variable_static_text_label)
+        self.top_grid_layout.addWidget(self._variable_static_text_tool_bar, 3, 2, 1, 1)
+        for r in range(3, 4):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(2, 3):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self._onoff_manual_options = (0, 1, )
+        self._onoff_manual_labels = ('Tracking', 'Acquisition', )
+        self._onoff_manual_group_box = Qt.QGroupBox('Manual Acq/Tra')
+        self._onoff_manual_box = Qt.QVBoxLayout()
+        class variable_chooser_button_group(Qt.QButtonGroup):
+            def __init__(self, parent=None):
+                Qt.QButtonGroup.__init__(self, parent)
+            @pyqtSlot(int)
+            def updateButtonChecked(self, button_id):
+                self.button(button_id).setChecked(True)
+        self._onoff_manual_button_group = variable_chooser_button_group()
+        self._onoff_manual_group_box.setLayout(self._onoff_manual_box)
+        for i, label in enumerate(self._onoff_manual_labels):
+        	radio_button = Qt.QRadioButton(label)
+        	self._onoff_manual_box.addWidget(radio_button)
+        	self._onoff_manual_button_group.addButton(radio_button, i)
+        self._onoff_manual_callback = lambda i: Qt.QMetaObject.invokeMethod(self._onoff_manual_button_group, "updateButtonChecked", Qt.Q_ARG("int", self._onoff_manual_options.index(i)))
+        self._onoff_manual_callback(self.onoff_manual)
+        self._onoff_manual_button_group.buttonClicked[int].connect(
+        	lambda i: self.set_onoff_manual(self._onoff_manual_options[i]))
+        self.top_grid_layout.addWidget(self._onoff_manual_group_box, 3, 0, 1, 1)
+        for r in range(3, 4):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(0, 1):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self._n_filt_tool_bar = Qt.QToolBar(self)
+
+        if None:
+          self._n_filt_formatter = None
+        else:
+          self._n_filt_formatter = lambda x: str(x)
+
+        self._n_filt_tool_bar.addWidget(Qt.QLabel('n_filt'+": "))
+        self._n_filt_label = Qt.QLabel(str(self._n_filt_formatter(self.n_filt)))
+        self._n_filt_tool_bar.addWidget(self._n_filt_label)
+        self.top_grid_layout.addWidget(self._n_filt_tool_bar, 6, 0, 1, 1)
+        for r in range(6, 7):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(0, 1):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self._manual_options = (0, 1, )
+        self._manual_labels = ('Auto', 'Manual', )
+        self._manual_group_box = Qt.QGroupBox('Manual/Auto')
+        self._manual_box = Qt.QVBoxLayout()
+        class variable_chooser_button_group(Qt.QButtonGroup):
+            def __init__(self, parent=None):
+                Qt.QButtonGroup.__init__(self, parent)
+            @pyqtSlot(int)
+            def updateButtonChecked(self, button_id):
+                self.button(button_id).setChecked(True)
+        self._manual_button_group = variable_chooser_button_group()
+        self._manual_group_box.setLayout(self._manual_box)
+        for i, label in enumerate(self._manual_labels):
+        	radio_button = Qt.QRadioButton(label)
+        	self._manual_box.addWidget(radio_button)
+        	self._manual_button_group.addButton(radio_button, i)
+        self._manual_callback = lambda i: Qt.QMetaObject.invokeMethod(self._manual_button_group, "updateButtonChecked", Qt.Q_ARG("int", self._manual_options.index(i)))
+        self._manual_callback(self.manual)
+        self._manual_button_group.buttonClicked[int].connect(
+        	lambda i: self.set_manual(self._manual_options[i]))
+        self.top_grid_layout.addWidget(self._manual_group_box, 3, 1, 1, 1)
+        for r in range(3, 4):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(1, 2):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self._freq_est_acq_tool_bar = Qt.QToolBar(self)
+
+        if None:
+          self._freq_est_acq_formatter = None
+        else:
+          self._freq_est_acq_formatter = lambda x: eng_notation.num_to_str(x)
+
+        self._freq_est_acq_tool_bar.addWidget(Qt.QLabel("freq_est_acq"+": "))
+        self._freq_est_acq_label = Qt.QLabel(str(self._freq_est_acq_formatter(self.freq_est_acq)))
+        self._freq_est_acq_tool_bar.addWidget(self._freq_est_acq_label)
+        self.top_grid_layout.addWidget(self._freq_est_acq_tool_bar, 7, 0, 1, 1)
+        for r in range(7, 8):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(0, 1):
+            self.top_grid_layout.setColumnStretch(c, 1)
+
+        def _freq_acq_est_probe():
+            while True:
+                val = self.blocks_probe_freq.level()
+                try:
+                    self.set_freq_acq_est(val)
+                except AttributeError:
+                    pass
+                time.sleep(1.0 / (10))
+        _freq_acq_est_thread = threading.Thread(target=_freq_acq_est_probe)
+        _freq_acq_est_thread.daemon = True
+        _freq_acq_est_thread.start()
+
+        self._fmaxt_tool_bar = Qt.QToolBar(self)
+
+        if None:
+          self._fmaxt_formatter = None
+        else:
+          self._fmaxt_formatter = lambda x: eng_notation.num_to_str(x)
+
+        self._fmaxt_tool_bar.addWidget(Qt.QLabel('f_max (Hz)'+": "))
+        self._fmaxt_label = Qt.QLabel(str(self._fmaxt_formatter(self.fmaxt)))
+        self._fmaxt_tool_bar.addWidget(self._fmaxt_label)
+        self.top_grid_layout.addWidget(self._fmaxt_tool_bar, 6, 1, 1, 1)
+        for r in range(6, 7):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(1, 2):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self._dft_tool_bar = Qt.QToolBar(self)
+
+        if None:
+          self._dft_formatter = None
+        else:
+          self._dft_formatter = lambda x: eng_notation.num_to_str(x)
+
+        self._dft_tool_bar.addWidget(Qt.QLabel('Deltaf (Hz)'+": "))
+        self._dft_label = Qt.QLabel(str(self._dft_formatter(self.dft)))
+        self._dft_tool_bar.addWidget(self._dft_label)
+        self.top_grid_layout.addWidget(self._dft_tool_bar, 6, 2, 1, 1)
+        for r in range(6, 7):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(2, 3):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self.channels_channel_model_0 = channels.channel_model(
+        	noise_voltage=(chips_per_symbol*N0/2)**0.5,
+        	frequency_offset=df_Hz/samp_rate,
+        	epsilon=1.0,
+        	taps=((delay)*(0,)+(1,)+(100-1-delay)*(0,)),
+        	noise_seed=0,
+        	block_tags=False
+        )
+        self.cdma_tx_hier_0 = cdma_tx_hier()
+        self.cdma_rx_hier_0 = cdma_rx_hier(
+            acq=onoff,
+            acq_threshold_dB=acq_threshold_dB,
+        )
+        self.blocks_vector_source_x_0_1 = blocks.vector_source_b(payload, True, 1, tagged_streams.make_lengthtags((payload_bytes_per_frame,), (0,), cp.length_tag_name))
+        self.blocks_throttle_0_0 = blocks.throttle(gr.sizeof_char*1, (symbol_rate*cp.bits_per_uncoded_symbol)/8,True)
+        self.blocks_tag_gate_0 = blocks.tag_gate(gr.sizeof_gr_complex * 1, False)
+        self.blocks_tag_gate_0.set_single_key("")
+        self.blocks_probe_signal_n0_1 = blocks.probe_signal_f()
+        self.blocks_probe_signal_n0_0_0 = blocks.probe_signal_f()
+        self.blocks_probe_signal_n0_0 = blocks.probe_signal_f()
+        self.blocks_probe_signal_amp_0 = blocks.probe_signal_f()
+        self.blocks_null_sink_0_0 = blocks.null_sink(gr.sizeof_gr_complex*1)
+        self.blocks_multiply_const_vxx_1_0 = blocks.multiply_const_vff((samp_rate, ))
+        self.blocks_multiply_const_vxx_1 = blocks.multiply_const_vcc((Es**0.5, ))
+        self._TrainingEsN0dB_tool_bar = Qt.QToolBar(self)
+
+        if None:
+          self._TrainingEsN0dB_formatter = None
+        else:
+          self._TrainingEsN0dB_formatter = lambda x: eng_notation.num_to_str(x)
+
+        self._TrainingEsN0dB_tool_bar.addWidget(Qt.QLabel('TrainingEsN0dB_est'+": "))
+        self._TrainingEsN0dB_label = Qt.QLabel(str(self._TrainingEsN0dB_formatter(self.TrainingEsN0dB)))
+        self._TrainingEsN0dB_tool_bar.addWidget(self._TrainingEsN0dB_label)
+        self.top_grid_layout.addWidget(self._TrainingEsN0dB_tool_bar, 8, 0, 1, 2)
+        for r in range(8, 9):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(0, 2):
+            self.top_grid_layout.setColumnStretch(c, 1)
+
+        def _N0est_probe():
+            while True:
+                val = self.blocks_probe_signal_n0.level()
+                try:
+                    self.set_N0est(val)
+                except AttributeError:
+                    pass
+                time.sleep(1.0 / (10))
+        _N0est_thread = threading.Thread(target=_N0est_probe)
+        _N0est_thread.daemon = True
+        _N0est_thread.start()
+
+
+        def _Esest_probe():
+            while True:
+                val = self.blocks_probe_signal_amp.level()
+                try:
+                    self.set_Esest(val)
+                except AttributeError:
+                    pass
+                time.sleep(1.0 / (10))
+        _Esest_thread = threading.Thread(target=_Esest_probe)
+        _Esest_thread.daemon = True
+        _Esest_thread.start()
+
+        self._EsN0dB_range = Range(-20, 80, 0.1, 20, 200)
+        self._EsN0dB_win = RangeWidget(self._EsN0dB_range, self.set_EsN0dB, 'EsN0dB', "counter_slider", float)
+        self.top_grid_layout.addWidget(self._EsN0dB_win, 0, 0, 1, 3)
+        for r in range(0, 1):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(0, 3):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self._DataEsN0dBthreshold_range = Range(0, 20, 0.1, 10, 500)
+        self._DataEsN0dBthreshold_win = RangeWidget(self._DataEsN0dBthreshold_range, self.set_DataEsN0dBthreshold, 'DataEsN0dBthreshold', "counter_slider", float)
+        self.top_grid_layout.addWidget(self._DataEsN0dBthreshold_win, 5, 0, 1, 3)
+        for r in range(5, 6):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(0, 3):
+            self.top_grid_layout.setColumnStretch(c, 1)
+        self._DataEsN0dB_estimated_tool_bar = Qt.QToolBar(self)
+
+        if None:
+          self._DataEsN0dB_estimated_formatter = None
+        else:
+          self._DataEsN0dB_estimated_formatter = lambda x: eng_notation.num_to_str(x)
+
+        self._DataEsN0dB_estimated_tool_bar.addWidget(Qt.QLabel('DataEsN0dB_est'+": "))
+        self._DataEsN0dB_estimated_label = Qt.QLabel(str(self._DataEsN0dB_estimated_formatter(self.DataEsN0dB_estimated)))
+        self._DataEsN0dB_estimated_tool_bar.addWidget(self._DataEsN0dB_estimated_label)
+        self.top_grid_layout.addWidget(self._DataEsN0dB_estimated_tool_bar, 9, 0, 1, 2)
+        for r in range(9, 10):
+            self.top_grid_layout.setRowStretch(r, 1)
+        for c in range(0, 2):
+            self.top_grid_layout.setColumnStretch(c, 1)
+
+
+
+        ##################################################
+        # Connections
+        ##################################################
+        self.connect((self.blocks_multiply_const_vxx_1, 0), (self.channels_channel_model_0, 0))
+        self.connect((self.blocks_multiply_const_vxx_1_0, 0), (self.blocks_probe_freq, 0))
+        self.connect((self.blocks_tag_gate_0, 0), (self.blocks_null_sink_0_0, 0))
+        self.connect((self.blocks_tag_gate_0, 0), (self.cdma_rx_hier_0, 0))
+        self.connect((self.blocks_throttle_0_0, 0), (self.cdma_tx_hier_0, 0))
+        self.connect((self.blocks_vector_source_x_0_1, 0), (self.blocks_throttle_0_0, 0))
+        self.connect((self.cdma_rx_hier_0, 9), (self.blocks_multiply_const_vxx_1_0, 0))
+        self.connect((self.cdma_rx_hier_0, 4), (self.blocks_probe_signal_amp, 0))
+        self.connect((self.cdma_rx_hier_0, 7), (self.blocks_probe_signal_amp_0, 0))
+        self.connect((self.cdma_rx_hier_0, 0), (self.blocks_probe_signal_n0, 0))
+        self.connect((self.cdma_rx_hier_0, 5), (self.blocks_probe_signal_n0_0, 0))
+        self.connect((self.cdma_rx_hier_0, 8), (self.blocks_probe_signal_n0_0_0, 0))
+        self.connect((self.cdma_rx_hier_0, 6), (self.blocks_probe_signal_n0_1, 0))
+        self.connect((self.cdma_tx_hier_0, 0), (self.blocks_multiply_const_vxx_1, 0))
+        self.connect((self.channels_channel_model_0, 0), (self.blocks_tag_gate_0, 0))
+
+    def closeEvent(self, event):
+        self.settings = Qt.QSettings("GNU Radio", "qt_cdma_txrx")
+        self.settings.setValue("geometry", self.saveGeometry())
+        event.accept()
+
+    def get_N0est(self):
+        return self.N0est
+
+    def set_N0est(self, N0est):
+        self.N0est = N0est
+        self.set_EsN0dB_est(10*numpy.log10( cp.epsilon+ abs(self.Esest)/ (abs(self.N0est)+cp.epsilon) ) )
+
+    def get_Esest(self):
+        return self.Esest
+
+    def set_Esest(self, Esest):
+        self.Esest = Esest
+        self.set_EsN0dB_est(10*numpy.log10( cp.epsilon+ abs(self.Esest)/ (abs(self.N0est)+cp.epsilon) ) )
+
+    def get_training_percent(self):
+        return self.training_percent
+
+    def set_training_percent(self, training_percent):
+        self.training_percent = training_percent
+        self.set_TrainingEsN0dB_est(self.EsN0dB_est + 10*numpy.log10( self.training_percent/100.0 ) )
+        self.set_DataEsN0dB_est(self.EsN0dB_est + 10*numpy.log10( 1.0-self.training_percent/100.0 ) )
+
+    def get_EsN0dB_est(self):
+        return self.EsN0dB_est
+
+    def set_EsN0dB_est(self, EsN0dB_est):
+        self.EsN0dB_est = EsN0dB_est
+        self.set_TrainingEsN0dB_est(self.EsN0dB_est + 10*numpy.log10( self.training_percent/100.0 ) )
+        self.set_DataEsN0dB_est(self.EsN0dB_est + 10*numpy.log10( 1.0-self.training_percent/100.0 ) )
+
+    def get_symbol_rate(self):
+        return self.symbol_rate
+
+    def set_symbol_rate(self, symbol_rate):
+        self.symbol_rate = symbol_rate
+        self.set_samp_rate(self.symbol_rate*self.chips_per_symbol)
+        self.blocks_throttle_0_0.set_sample_rate((self.symbol_rate*cp.bits_per_uncoded_symbol)/8)
+
+    def get_chips_per_symbol(self):
+        return self.chips_per_symbol
+
+    def set_chips_per_symbol(self, chips_per_symbol):
+        self.chips_per_symbol = chips_per_symbol
+        self.set_samp_rate(self.symbol_rate*self.chips_per_symbol)
+        self.channels_channel_model_0.set_noise_voltage((self.chips_per_symbol*self.N0/2)**0.5)
+
+    def get_DataEsN0dBthreshold(self):
+        return self.DataEsN0dBthreshold
+
+    def set_DataEsN0dBthreshold(self, DataEsN0dBthreshold):
+        self.DataEsN0dBthreshold = DataEsN0dBthreshold
+        self.set_onoff_auto(0 if self.DataEsN0dB_est>self.DataEsN0dBthreshold else 1)
+
+    def get_DataEsN0dB_est(self):
+        return self.DataEsN0dB_est
+
+    def set_DataEsN0dB_est(self, DataEsN0dB_est):
+        self.DataEsN0dB_est = DataEsN0dB_est
+        self.set_onoff_auto(0 if self.DataEsN0dB_est>self.DataEsN0dBthreshold else 1)
+        self.set_DataEsN0dB_estimated(self._DataEsN0dB_estimated_formatter(self.DataEsN0dB_est))
+
+    def get_samp_rate(self):
+        return self.samp_rate
+
+    def set_samp_rate(self, samp_rate):
+        self.samp_rate = samp_rate
+        self.set_fmaxt(self._fmaxt_formatter(cp.freqs[-1]*self.samp_rate))
+        self.set_df(cp.df*self.samp_rate)
+        self.channels_channel_model_0.set_frequency_offset(self.df_Hz/self.samp_rate)
+        self.blocks_multiply_const_vxx_1_0.set_k((self.samp_rate, ))
+
+    def get_onoff_manual(self):
+        return self.onoff_manual
+
+    def set_onoff_manual(self, onoff_manual):
+        self.onoff_manual = onoff_manual
+        self.set_onoff(self.onoff_auto if self.manual==0 else self.onoff_manual)
+        self._onoff_manual_callback(self.onoff_manual)
+
+    def get_onoff_auto(self):
+        return self.onoff_auto
+
+    def set_onoff_auto(self, onoff_auto):
+        self.onoff_auto = onoff_auto
+        self.set_onoff(self.onoff_auto if self.manual==0 else self.onoff_manual)
+
+    def get_manual(self):
+        return self.manual
+
+    def set_manual(self, manual):
+        self.manual = manual
+        self.set_onoff(self.onoff_auto if self.manual==0 else self.onoff_manual)
+        self._manual_callback(self.manual)
+
+    def get_payload_bytes_per_frame(self):
+        return self.payload_bytes_per_frame
+
+    def set_payload_bytes_per_frame(self, payload_bytes_per_frame):
+        self.payload_bytes_per_frame = payload_bytes_per_frame
+        self.set_payload(map(int,numpy.random.randint(0,256,self.payload_bytes_per_frame)))
+        self.blocks_vector_source_x_0_1.set_data(self.payload, tagged_streams.make_lengthtags((self.payload_bytes_per_frame,), (0,), cp.length_tag_name))
+
+    def get_onoff(self):
+        return self.onoff
+
+    def set_onoff(self, onoff):
+        self.onoff = onoff
+        self.set_variable_static_text(self._variable_static_text_formatter('Acquisition' if self.onoff==1 else 'Tracking'))
+        self.cdma_rx_hier_0.set_acq(self.onoff)
+
+    def get_freq_acq_est(self):
+        return self.freq_acq_est
+
+    def set_freq_acq_est(self, freq_acq_est):
+        self.freq_acq_est = freq_acq_est
+        self.set_freq_est_acq(self._freq_est_acq_formatter(self.freq_acq_est))
+
+    def get_df(self):
+        return self.df
+
+    def set_df(self, df):
+        self.df = df
+        self.set_dft(self._dft_formatter(self.df))
+
+    def get_TrainingEsN0dB_est(self):
+        return self.TrainingEsN0dB_est
+
+    def set_TrainingEsN0dB_est(self, TrainingEsN0dB_est):
+        self.TrainingEsN0dB_est = TrainingEsN0dB_est
+        self.set_TrainingEsN0dB(self._TrainingEsN0dB_formatter(self.TrainingEsN0dB_est))
+
+    def get_EsN0dB(self):
+        return self.EsN0dB
+
+    def set_EsN0dB(self, EsN0dB):
+        self.EsN0dB = EsN0dB
+        self.set_N0(10**(-self.EsN0dB/10) * self.Es)
+
+    def get_Es(self):
+        return self.Es
+
+    def set_Es(self, Es):
+        self.Es = Es
+        self.set_N0(10**(-self.EsN0dB/10) * self.Es)
+        self.blocks_multiply_const_vxx_1.set_k((self.Es**0.5, ))
+
+    def get_variable_static_text(self):
+        return self.variable_static_text
+
+    def set_variable_static_text(self, variable_static_text):
+        self.variable_static_text = variable_static_text
+        Qt.QMetaObject.invokeMethod(self._variable_static_text_label, "setText", Qt.Q_ARG("QString", self.variable_static_text))
+
+    def get_payload(self):
+        return self.payload
+
+    def set_payload(self, payload):
+        self.payload = payload
+        self.blocks_vector_source_x_0_1.set_data(self.payload, tagged_streams.make_lengthtags((self.payload_bytes_per_frame,), (0,), cp.length_tag_name))
+
+    def get_n_filt(self):
+        return self.n_filt
+
+    def set_n_filt(self, n_filt):
+        self.n_filt = n_filt
+        Qt.QMetaObject.invokeMethod(self._n_filt_label, "setText", Qt.Q_ARG("QString", self.n_filt))
+
+    def get_freq_est_acq(self):
+        return self.freq_est_acq
+
+    def set_freq_est_acq(self, freq_est_acq):
+        self.freq_est_acq = freq_est_acq
+        Qt.QMetaObject.invokeMethod(self._freq_est_acq_label, "setText", Qt.Q_ARG("QString", self.freq_est_acq))
+
+    def get_fmaxt(self):
+        return self.fmaxt
+
+    def set_fmaxt(self, fmaxt):
+        self.fmaxt = fmaxt
+        Qt.QMetaObject.invokeMethod(self._fmaxt_label, "setText", Qt.Q_ARG("QString", self.fmaxt))
+
+    def get_dft(self):
+        return self.dft
+
+    def set_dft(self, dft):
+        self.dft = dft
+        Qt.QMetaObject.invokeMethod(self._dft_label, "setText", Qt.Q_ARG("QString", self.dft))
+
+    def get_df_Hz(self):
+        return self.df_Hz
+
+    def set_df_Hz(self, df_Hz):
+        self.df_Hz = df_Hz
+        self.channels_channel_model_0.set_frequency_offset(self.df_Hz/self.samp_rate)
+
+    def get_delay(self):
+        return self.delay
+
+    def set_delay(self, delay):
+        self.delay = delay
+        self.channels_channel_model_0.set_taps(((self.delay)*(0,)+(1,)+(100-1-self.delay)*(0,)))
+
+    def get_acq_threshold_dB(self):
+        return self.acq_threshold_dB
+
+    def set_acq_threshold_dB(self, acq_threshold_dB):
+        self.acq_threshold_dB = acq_threshold_dB
+        self.cdma_rx_hier_0.set_acq_threshold_dB(self.acq_threshold_dB)
+
+    def get_TrainingEsN0dB(self):
+        return self.TrainingEsN0dB
+
+    def set_TrainingEsN0dB(self, TrainingEsN0dB):
+        self.TrainingEsN0dB = TrainingEsN0dB
+        Qt.QMetaObject.invokeMethod(self._TrainingEsN0dB_label, "setText", Qt.Q_ARG("QString", self.TrainingEsN0dB))
+
+    def get_N0(self):
+        return self.N0
+
+    def set_N0(self, N0):
+        self.N0 = N0
+        self.channels_channel_model_0.set_noise_voltage((self.chips_per_symbol*self.N0/2)**0.5)
+
+    def get_DataEsN0dB_estimated(self):
+        return self.DataEsN0dB_estimated
+
+    def set_DataEsN0dB_estimated(self, DataEsN0dB_estimated):
+        self.DataEsN0dB_estimated = DataEsN0dB_estimated
+        Qt.QMetaObject.invokeMethod(self._DataEsN0dB_estimated_label, "setText", Qt.Q_ARG("QString", self.DataEsN0dB_estimated))
+
+
+def main(top_block_cls=qt_cdma_txrx, options=None):
+
+    from distutils.version import StrictVersion
+    if StrictVersion(Qt.qVersion()) >= StrictVersion("4.5.0"):
+        style = gr.prefs().get_string('qtgui', 'style', 'raster')
+        Qt.QApplication.setGraphicsSystem(style)
+    qapp = Qt.QApplication(sys.argv)
+
+    tb = top_block_cls()
+    tb.start()
+    tb.show()
+
+    def quitting():
+        tb.stop()
+        tb.wait()
+    qapp.connect(qapp, Qt.SIGNAL("aboutToQuit()"), quitting)
+    qapp.exec_()
+
+
+if __name__ == '__main__':
+    main()
